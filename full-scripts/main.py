@@ -225,23 +225,23 @@ def filter_tools(K: int, row, sample_df: pd.DataFrame):
 
 
 
-def run_row(K, row, tool_df: pd.DataFrame):
+def run_row(row, tool_df: pd.DataFrame, use_rag: bool = True):
     sample_df = generate_sample(
         s=S, correct_tools=row["correct_tool"], tool_df=tool_df
     )
 
-    filtered_tools = filter_tools(K, row, sample_df)
-
-    tools = filtered_tools["oai_format"].tolist()
-
-
+    if use_rag:
+        filtered_tools = filter_tools(K, row, sample_df)
+        tools = filtered_tools["oai_format"].tolist()
+    else:
+        tools = sample_df["oai_format"].tolist()
 
     max_retries = 5
     for attempt in range(max_retries):
         try:
             start_time = time.time()
             response = client.responses.create(
-                model="gpt-5",
+                model="gpt-5-mini",
                 input=row["question"][0],
                 tools=tools,
                 tool_choice="required",
@@ -258,8 +258,9 @@ def run_row(K, row, tool_df: pd.DataFrame):
     return correct, reason, latency, response
 
 
-def run_experiment(eval_df: pd.DataFrame, tool_df: pd.DataFrame) -> pd.DataFrame:
-    print(f"── Experiment (s={S}, workers={MAX_WORKERS}) ──────────────────")
+def run_experiment(eval_df: pd.DataFrame, tool_df: pd.DataFrame, use_rag: bool = True) -> pd.DataFrame:
+    mode = "RAG" if use_rag else "No-RAG"
+    print(f"── Experiment [{mode}] (s={S}, workers={MAX_WORKERS}) ──────────────────")
 
     eval_df["correct_tool"] = eval_df["ground_truth"].apply(
         lambda x: [s for item in x for s in item.keys()]
@@ -269,11 +270,11 @@ def run_experiment(eval_df: pd.DataFrame, tool_df: pd.DataFrame) -> pd.DataFrame
 
     print(f"  Eval rows: {len(eval_df)}")
     print(f"  Unique tools: {tool_df['name'].nunique()}")
-    print(f"  Sample size (S): {S}, Top-K filter: {K}, Workers: {MAX_WORKERS}")
+    print(f"  Sample size (S): {S}, Top-K filter: {K if use_rag else 'N/A'}, Workers: {MAX_WORKERS}")
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {
-            executor.submit(run_row, row, tool_df): i
+            executor.submit(run_row, row, tool_df, use_rag): i
             for i, (_, row) in enumerate(eval_df.iterrows())
         }
         for future in tqdm(as_completed(futures), total=len(futures), desc="  Evaluating"):
@@ -343,7 +344,7 @@ def test_single_row(row_idx: int = 0):
     print(f"\n  Calling LLM with {len(tools)} tools...")
     start_time = time.time()
     response = client.responses.create(
-        model="gpt-5",
+        model="gpt-5-mini",
         input=row["question"][0],
         tools=tools,
         tool_choice="required",
@@ -376,33 +377,46 @@ def test_single_row(row_idx: int = 0):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def main():
+def main(use_rag: bool):
     # 1 ─ Data collection
     eval_df, tool_df = collect_data()
 
     # 2 ─ Prepare test set (embeddings + token counts + OAI format)
     tool_df = prepare_test_set(tool_df)
 
-    # 3 ─ Run naive experiment (case 1: at least one correct tool in pool)
-    results_df = run_experiment(eval_df, tool_df)
+    # 3 ─ Run experiment
+    mode = "RAG" if use_rag else "No-RAG"
+    results_df = run_experiment(eval_df, tool_df, use_rag=use_rag)
 
-    # ─ Report
-    print("\n── Results ─────────────────────────────────────────")
+    avg_tokens = tool_df['n_tokens'].mean() * (K if use_rag else S)
+    print(f"\n── Results [{mode}] ─────────────────────────────────")
     print(results_df["reason"].value_counts().to_string())
     print(f"\n  Accuracy: {results_df['correct'].mean():.2%}")
     print(f"  Mean latency: {results_df['latency'].mean():.2f}s")
-    print(f"  Avg tool tokens per sample: {tool_df['n_tokens'].mean() * S:.0f}")
+    print(f"  Avg tool tokens per sample: {avg_tokens:.0f}")
 
-    # ─ Save
-    out_path = os.path.join(DATA_DIR, f"{S}-tools-gpt-5-results.pkl")
+    tag = "rag" if use_rag else "norag"
+    out_path = os.path.join(DATA_DIR, f"{S}-tools-gpt-5-{tag}-results.pkl")
     results_df.to_pickle(out_path)
-    print(f"\n  Saved results → {out_path}")
+    print(f"  Saved → {out_path}")
 
 
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "test":
+    usage = "Usage: python main.py [rag|norag|test [row_idx]]"
+
+    if len(sys.argv) < 2:
+        print(usage)
+        sys.exit(1)
+
+    cmd = sys.argv[1]
+    if cmd == "test":
         row_idx = int(sys.argv[2]) if len(sys.argv) > 2 else 0
         test_single_row(row_idx)
+    elif cmd == "rag":
+        main(use_rag=True)
+    elif cmd == "norag":
+        main(use_rag=False)
     else:
-        main()
+        print(f"Unknown command: {cmd}\n{usage}")
+        sys.exit(1)
