@@ -98,9 +98,10 @@ def to_oai_tool(tool: dict) -> dict:
 
 def prepare_test_set(tool_df: pd.DataFrame) -> pd.DataFrame:
     print("── Preparing Test Set ──────────────────────────────")
+    pkl_path = os.path.join(DATA_DIR, "pkls", "ntokens_embeddings_tool_df.pkl")
     try:
-        print("READ TOOL_DF PICKLE SUCCESSFUL")
-        tool_df = pd.read_pickle("../data/pkls/ntokens_embeddings_tool_df.pkl")
+        tool_df = pd.read_pickle(pkl_path)
+        print(f"  READ TOOL_DF PICKLE SUCCESSFUL ({pkl_path})")
         return tool_df
     except FileNotFoundError:
 
