@@ -17,8 +17,8 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 DATASET_PATH = os.path.join(DATA_DIR, "datasets", "BFCL_v4_live_multiple.json")
 ANSWERS_PATH = os.path.join(DATA_DIR, "datasets", "possible_answer", "BFCL_v4_live_multiple.json")
 
-K = 5    # top-k for semantic retrieval
-MAX_WORKERS = 8
+K = 10    # top-k for semantic retrieval
+MAX_WORKERS = 16
 EMBEDDING_BATCH_SIZE = 100
 
 client = OpenAI()  # uses OPENAI_API_KEY env var
