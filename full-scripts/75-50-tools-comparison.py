@@ -17,8 +17,7 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 DATASET_PATH = os.path.join(DATA_DIR, "datasets", "BFCL_v4_live_multiple.json")
 ANSWERS_PATH = os.path.join(DATA_DIR, "datasets", "possible_answer", "BFCL_v4_live_multiple.json")
 
-S = 50   # LLM makes choice out of S potential tools
-K = 5    # top-k for semantic retrieval (unused in naive experiment)
+K = 5    # top-k for semantic retrieval
 MAX_WORKERS = 8
 EMBEDDING_BATCH_SIZE = 100
 
@@ -99,11 +98,11 @@ def to_oai_tool(tool: dict) -> dict:
 
 def prepare_test_set(tool_df: pd.DataFrame) -> pd.DataFrame:
     print("── Preparing Test Set ──────────────────────────────")
-    try: 
+    try:
         print("READ TOOL_DF PICKLE SUCCESSFUL")
         tool_df = pd.read_pickle("../data/pkls/ntokens_embeddings_tool_df.pkl")
         return tool_df
-    except FileNotFoundError: 
+    except FileNotFoundError:
 
         # Embeddings
         tool_df["embedding_input"] = (
@@ -216,7 +215,7 @@ def check_answer(
             return False, "required tool call was not made"
 
 
-def filter_tools(K: int, row, sample_df: pd.DataFrame): 
+def filter_tools(K: int, row, sample_df: pd.DataFrame):
     response = client.embeddings.create(model="text-embedding-3-large", input=str(row['question']))
     question_embedding = response.data[0].embedding
     scores = cosine_similarity([question_embedding], np.stack(sample_df['embeddings'].values))
@@ -225,9 +224,9 @@ def filter_tools(K: int, row, sample_df: pd.DataFrame):
 
 
 
-def run_row(row, tool_df: pd.DataFrame, use_rag: bool = True):
+def run_row(row, tool_df: pd.DataFrame, s: int, use_rag: bool = True):
     sample_df = generate_sample(
-        s=S, correct_tools=row["correct_tool"], tool_df=tool_df
+        s=s, correct_tools=row["correct_tool"], tool_df=tool_df
     )
 
     if use_rag:
@@ -258,9 +257,9 @@ def run_row(row, tool_df: pd.DataFrame, use_rag: bool = True):
     return correct, reason, latency, response
 
 
-def run_experiment(eval_df: pd.DataFrame, tool_df: pd.DataFrame, use_rag: bool = True) -> pd.DataFrame:
+def run_experiment(eval_df: pd.DataFrame, tool_df: pd.DataFrame, s: int, use_rag: bool = True) -> pd.DataFrame:
     mode = "RAG" if use_rag else "No-RAG"
-    print(f"── Experiment [{mode}] (s={S}, workers={MAX_WORKERS}) ──────────────────")
+    print(f"── Experiment [{mode}] (s={s}, workers={MAX_WORKERS}) ──────────────────")
 
     eval_df["correct_tool"] = eval_df["ground_truth"].apply(
         lambda x: [s for item in x for s in item.keys()]
@@ -270,11 +269,11 @@ def run_experiment(eval_df: pd.DataFrame, tool_df: pd.DataFrame, use_rag: bool =
 
     print(f"  Eval rows: {len(eval_df)}")
     print(f"  Unique tools: {tool_df['name'].nunique()}")
-    print(f"  Sample size (S): {S}, Top-K filter: {K if use_rag else 'N/A'}, Workers: {MAX_WORKERS}")
+    print(f"  Sample size (S): {s}, Top-K filter: {K if use_rag else 'N/A'}, Workers: {MAX_WORKERS}")
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {
-            executor.submit(run_row, row, tool_df, use_rag): i
+            executor.submit(run_row, row, tool_df, s, use_rag): i
             for i, (_, row) in enumerate(eval_df.iterrows())
         }
         for future in tqdm(as_completed(futures), total=len(futures), desc="  Evaluating"):
@@ -298,125 +297,44 @@ def run_experiment(eval_df: pd.DataFrame, tool_df: pd.DataFrame, use_rag: bool =
     return results_df
 
 
-# ── Test Single Row ───────────────────────────────────────────────────────────
-
-def test_single_row(row_idx: int = 0):
-    """Run a single eval row end-to-end with verbose output for debugging."""
-    eval_df, tool_df = collect_data()
-    tool_df = prepare_test_set(tool_df)
-
-    eval_df["correct_tool"] = eval_df["ground_truth"].apply(
-        lambda x: [s for item in x for s in item.keys()]
-    )
-
-    row = eval_df.iloc[row_idx]
-
-    print(f"\n── Test Row {row_idx} ────────────────────────────────────")
-    print(f"  Question: {row['question'][0][:200]}...")
-    print(f"  Ground truth tools: {[k for d in row['ground_truth'] for k in d.keys()]}")
-    print(f"  Correct tools: {row['correct_tool']}")
-
-    # Print GT tool descriptions from tool_df
-    tool_df_dedup = tool_df.drop_duplicates(subset=["name"])
-    for tool_name in row["correct_tool"]:
-        match = tool_df_dedup.loc[tool_df_dedup["name"] == tool_name]
-        if not match.empty:
-            print(f"\n  ── GT Tool: {tool_name} ──")
-            print(f"    Description: {match.iloc[0]['description']}")
-            print(f"    Parameters: {json.dumps(match.iloc[0]['parameters'], indent=6)}")
-
-    # Generate sample pool
-    sample_df = generate_sample(s=S, correct_tools=row["correct_tool"], tool_df=tool_df)
-    print(f"\n  Sample pool size: {len(sample_df)}")
-    print(f"  Sample tool names: {sample_df['name'].tolist()[:10]}... (showing first 10)")
-
-    # Filter tools
-    filtered = filter_tools(K, row, sample_df)
-    print(f"\n  Filtered to top-{K}: {filtered['name'].tolist()}")
-    correct_in_filtered = set(row["correct_tool"]) & set(filtered["name"].tolist())
-    missing = set(row["correct_tool"]) - set(filtered["name"].tolist())
-    print(f"  Correct tools in filtered: {correct_in_filtered}")
-    if missing:
-        print(f"  WARNING — correct tools missing from filtered set: {missing}")
-    
-    # Call LLM
-    tools = filtered["oai_format"].tolist()
-    print(f"\n  Calling LLM with {len(tools)} tools...")
-    start_time = time.time()
-    response = client.responses.create(
-        model="gpt-5-mini",
-        input=[{"role": "system", "content": "Only parameterize the fields specified in a query. Do not overwrite defaults unless required."}] + row['question'][0],
-        tools=tools,
-        tool_choice="required",
-    )
-    latency = time.time() - start_time
-
-    called = [item.name for item in response.output if item.type == "function_call"]
-    print(f"  LLM called: {called}")
-    print(f"  Latency: {latency:.2f}s")
-
-    # Print LLM tool calls with arguments
-    print(f"\n  ── LLM Output ──")
-    for item in response.output:
-        if item.type == "function_call":
-            print(f"    {item.name}({item.arguments})")
-
-    # Print expected ground truth
-    print(f"\n  ── Expected (Ground Truth) ──")
-    for gt in row["ground_truth"]:
-        for name, params in gt.items():
-            print(f"    {name}({json.dumps(params, indent=6)})")
-
-    # Check answer
-    correct, reason = check_answer(response, row["ground_truth"], tools)
-    print(f"\n  Correct: {correct}")
-    print(f"  Reason: {reason}")
-
-    return response
-
-
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def main(use_rag: bool):
-    # 1 ─ Data collection
-    eval_df, tool_df = collect_data()
-
-    # 2 ─ Prepare test set (embeddings + token counts + OAI format)
-    tool_df = prepare_test_set(tool_df)
-
-    # 3 ─ Run experiment
+def run_single(eval_df: pd.DataFrame, tool_df: pd.DataFrame, s: int, use_rag: bool):
     mode = "RAG" if use_rag else "No-RAG"
-    results_df = run_experiment(eval_df, tool_df, use_rag=use_rag)
+    tag = "rag" if use_rag else "norag"
 
-    avg_tokens = tool_df['n_tokens'].mean() * (K if use_rag else S)
-    print(f"\n── Results [{mode}] ─────────────────────────────────")
+    results_df = run_experiment(eval_df, tool_df, s=s, use_rag=use_rag)
+
+    avg_tokens = tool_df['n_tokens'].mean() * (K if use_rag else s)
+    print(f"\n── Results [{mode}, s={s}] ─────────────────────────────────")
     print(results_df["reason"].value_counts().to_string())
     print(f"\n  Accuracy: {results_df['correct'].mean():.2%}")
     print(f"  Mean latency: {results_df['latency'].mean():.2f}s")
     print(f"  Avg tool tokens per sample: {avg_tokens:.0f}")
 
-    tag = "rag" if use_rag else "norag"
-    out_path = os.path.join(DATA_DIR, f"{S}-tools-gpt-5-{tag}-results.pkl")
+    out_path = os.path.join(DATA_DIR, f"{s}-tools-gpt-5-{tag}-results.pkl")
     results_df.to_pickle(out_path)
     print(f"  Saved → {out_path}")
 
 
 if __name__ == "__main__":
-    import sys
-    usage = "Usage: python main.py [rag|norag|test [row_idx]]"
+    # 1 ─ Data collection (shared across all runs)
+    eval_df, tool_df = collect_data()
 
-    if len(sys.argv) < 2:
-        print(usage)
-        sys.exit(1)
+    # 2 ─ Prepare test set (shared across all runs)
+    tool_df = prepare_test_set(tool_df)
 
-    cmd = sys.argv[1]
-    if cmd == "test":
-        row_idx = int(sys.argv[2]) if len(sys.argv) > 2 else 0
-        test_single_row(row_idx)
-    elif cmd == "rag":
-        main(use_rag=True)
-    elif cmd == "norag":
-        main(use_rag=False)
-    else:
-        print(f"Unknown command: {cmd}\n{usage}")
-        sys.exit(1)
+    # 3 ─ Run all 6 experiments back-to-back
+    S_VALUES = [100, 75, 50]
+
+    for s in S_VALUES:
+        for use_rag in [False, True]:
+            mode = "RAG" if use_rag else "No-RAG"
+            print(f"\n{'='*60}")
+            print(f"  STARTING: s={s}, mode={mode}")
+            print(f"{'='*60}\n")
+            run_single(eval_df.copy(), tool_df, s=s, use_rag=use_rag)
+
+    print(f"\n{'='*60}")
+    print("  ALL EXPERIMENTS COMPLETE")
+    print(f"{'='*60}")
